@@ -182,7 +182,7 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config, n_embd=layer_widths[i]) for i in range(config.n_layer)]),
             ln_f = nn.ModuleList([LayerNorm(layer_widths[i], bias=config.bias) for i in range(config.n_layer)]),
         ))
-        self.value_embs = nn.ModuleList([
+        self.token_embeddings = nn.ModuleList([
             nn.Embedding(config.vocab_size, layer_widths[i]) for i in range(config.n_layer)
         ])
         self.layer_heads = nn.ModuleList([
@@ -223,6 +223,17 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
+    def load_state_dict(self, state_dict, *args, **kwargs):
+        # Preserve checkpoints written before the embedding modules were renamed.
+        legacy_prefix = "value_embs."
+        if any(key.startswith(legacy_prefix) for key in state_dict):
+            state_dict = state_dict.copy()
+            for key in list(state_dict):
+                if key.startswith(legacy_prefix):
+                    suffix = key[len(legacy_prefix):]
+                    state_dict[f"token_embeddings.{suffix}"] = state_dict.pop(key)
+        return super().load_state_dict(state_dict, *args, **kwargs)
+
     def forward(self, idx, targets=None, training: bool = False, return_layers: bool = False):
         device = idx.device
         b, t = idx.size()
@@ -244,7 +255,7 @@ class GPT(nn.Module):
             return (q - k) > window
 
         # forward the GPT model itself
-        tok_emb = self.value_embs[0](idx) # token embeddings of shape (b, t, n_embd)
+        tok_emb = self.token_embeddings[0](idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         layer_logits = []
@@ -286,10 +297,10 @@ class GPT(nn.Module):
                 if self.gate_mode == "learned":
                     gate = torch.sigmoid(self.gates[i-1](x))
                     x = pad_to_width(x, self.layer_widths[i])
-                    x = gate * self.value_embs[i](idx) + (1.0 - gate) * x
+                    x = gate * self.token_embeddings[i](idx) + (1.0 - gate) * x
                 else:
                     x = pad_to_width(x, self.layer_widths[i])
-                    x = x + self.value_embs[i](idx)
+                    x = x + self.token_embeddings[i](idx)
             x = block(x, attn_mask=layer_attn_mask)
             x_norm = self.transformer.ln_f[i](x)
             logits = self.layer_heads[i](x_norm)
